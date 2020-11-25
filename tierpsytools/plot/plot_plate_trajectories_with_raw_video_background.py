@@ -18,26 +18,29 @@ trajectories throughout the video, for the entire 96-well plate (imaged under
 
 import sys
 import h5py
-import tqdm
 import argparse
 import pandas as pd
 from matplotlib import pyplot as plt
 from pathlib import Path
+from tqdm import tqdm
 
+PATH_LIST = ['/Users/sm5911/Tierpsy_Versions/tierpsy-tracker']
+for sysPath in PATH_LIST:
+    if sysPath not in sys.path:
+        sys.path.insert(0, sysPath)
+        
 from tierpsy.analysis.split_fov.FOVMultiWellsSplitter import FOVMultiWellsSplitter
 from tierpsy.analysis.split_fov.helper import CAM2CH_df, serial2channel, parse_camera_serial
 
 
 #%% Channel-to-plate mapping dictionary (global)
 
-# {'channel' : ((ax array location), rotate)}
 CH2PLATE_dict = {'Ch1':((0,0),True),
                  'Ch2':((1,0),False),
                  'Ch3':((0,1),True),
                  'Ch4':((1,1),False),
                  'Ch5':((0,2),True),
                  'Ch6':((1,2),False)}
-  
 
 #%% Functions
         
@@ -97,17 +100,34 @@ def plot_trajectory(featurefilepath,
     
     ax.autoscale(enable=True, axis='x', tight=True) # re-scaling axes
     ax.autoscale(enable=True, axis='y', tight=True)
- 
 
-def get_video_set(featurefilepath):
+def convert_filepath_to_rawvideo(filepath):
+    """ Helper function to convert featuresN filepath or MaskedVideo filepath 
+        into RawVideo filepath """
+    
+    parentdir = str(Path(filepath).parent)
+    
+    dirlist = ["Results/", "MaskedVideos/"]
+    if "RawVideos/" in parentdir:
+        rawvideopath = filepath
+        return rawvideopath
+    else:
+        for dirname in dirlist:
+            if dirname in parentdir:
+                # featuresN filepath
+                rawvideopath = Path(str(parentdir).replace(dirname, "RawVideos/")) / 'metadata.yaml'
+                return rawvideopath
+
+def get_video_set(filepath):
     """ Get the set of filenames of the featuresN results files that belong to
         the same 96-well plate that was imaged under that rig """
         
-    dirpath = Path(featurefilepath).parent
-    maskedfilepath = Path(str(dirpath).replace("Results/","MaskedVideos/"))
+    rawvideopath = convert_filepath_to_rawvideo(filepath)
+    # maskedfilepath = Path(str(rawvideopath.parent).replace("RawVideos/","MaskedVideos/")) / "metadata.hdf5"
+    # featurefilepath = Path(str(rawvideopath.parent).replace("RawVideos/","Results/")) / "metadata_featuresN.hdf5"
     
     # get camera serial from filename
-    camera_serial = parse_camera_serial(featurefilepath)
+    camera_serial = parse_camera_serial(rawvideopath)
     
     # get list of camera serials for that hydra rig
     hydra_rig = CAM2CH_df.loc[CAM2CH_df['camera_serial']==camera_serial,'rig']
@@ -115,7 +135,7 @@ def get_video_set(featurefilepath):
     camera_serial_list = list(rig_df['camera_serial'])
    
     # extract filename stem 
-    file_stem = str(maskedfilepath).split('.' + camera_serial)[0]
+    file_stem = str(rawvideopath).split('.' + camera_serial)[0]
     
     file_dict = {}
     for camera_serial in camera_serial_list:
@@ -123,7 +143,7 @@ def get_video_set(featurefilepath):
         _loc, rotate = CH2PLATE_dict[channel]
         
         # get path to masked video file
-        maskedfilepath = Path(file_stem + '.' + camera_serial) / "metadata.hdf5"
+        maskedfilepath = Path(file_stem.replace('RawVideos/','MaskedVideos/') + '.' + camera_serial) / "metadata.hdf5"
         featurefilepath = Path(str(maskedfilepath.parent).replace("MaskedVideos/",\
                                "Results/")) / 'metadata_featuresN.hdf5'
         
@@ -132,11 +152,11 @@ def get_video_set(featurefilepath):
     return file_dict
 
     
-def plot_plate_trajectories(featurefilepath, saveDir=None, downsample=10):
+def plot_plate_trajectories(filepath, saveDir=None, show_trajectories=True, downsample=10, ignore_existing=True):
     """ Tile plots and merge into a single plot for the 
         entire 96-well plate, correcting for camera orientation. """
-        
-    file_dict = get_video_set(featurefilepath)
+    
+    file_dict = get_video_set(filepath)
     
     # define multi-panel figure
     columns = 3
@@ -152,6 +172,7 @@ def plot_plate_trajectories(featurefilepath, saveDir=None, downsample=10):
     width_tl = width + x_offset   # for top left image
     height = 1/rows        # for all images
     
+    plt.ioff()
     for channel, (maskedfilepath, featurefilepath) in file_dict.items():
         
         _loc, rotate = CH2PLATE_dict[channel]
@@ -172,39 +193,36 @@ def plot_plate_trajectories(featurefilepath, saveDir=None, downsample=10):
         FOVsplitter = FOVMultiWellsSplitter(maskedfilepath)
         FOVsplitter.plot_wells(is_rotate180=rotate, ax=ax, line_thickness=10)
         
-        # plot worm trajectories
-        plot_trajectory(featurefilepath, 
-                       ax=ax, 
-                       downsample=downsample,
-                       legend=False, 
-                       rotate=rotate, 
-                       img_shape=FOVsplitter.img_shape)
+        if show_trajectories:
+            # plot worm trajectories
+            plot_trajectory(featurefilepath, 
+                           ax=ax, 
+                           downsample=downsample,
+                           legend=False, 
+                           rotate=rotate, 
+                           img_shape=FOVsplitter.img_shape)
         
         # set image position in figure
         ax.set_position(bbox)
         
-    plt.show()
     if saveDir:
         saveName = maskedfilepath.parent.stem + '.png'
         savePath = Path(saveDir) / saveName
-        fig.savefig(savePath,
-                    bbox_inches='tight',
-                    dpi=300,
-                    pad_inches=0,
-                    transparent=True)            
-    return(fig)
+        if not savePath.is_file():
+            fig.savefig(savePath,
+                        bbox_inches='tight',
+                        dpi=300,
+                        pad_inches=0,
+                        transparent=True)   
+    return(fig)      
 
 
-def plot_plate_trajectories_from_filenames_summary(filenames_path, saveDir):
-    """ Plot plate trajectories for all files in Tierpsy filenames summaries
-        'filenames_path', and save results to 'saveDir' """
-
-    filenames_df = pd.read_csv(filenames_path, comment='#')
-    filenames_list = filenames_df[filenames_df['is_good']==True]['file_name']
+def plot_plate_trajectories_from_featuresN_filelist(featuresN_filelist, saveDir):
+    """ Plot plate trajectories from list of featuresN files """
     
     filestem_list = []
-    featurefile_list = []  
-    for fname in filenames_list:
+    featurefile_list = []
+    for fname in featuresN_filelist:
         # obtain file stem
         filestem = Path(fname).parent.parent / Path(fname).parent.stem
         
@@ -214,33 +232,51 @@ def plot_plate_trajectories_from_filenames_summary(filenames_path, saveDir):
             filestem_list.append(filestem)
             featurefile_list.append(fname)
     
-    # overlay trajectories and combine plots for each plate that was imaged
+    # overlay trajectories + combine plots
     for featurefilepath in tqdm(featurefile_list):
         plot_plate_trajectories(featurefilepath, saveDir)
-        
-        
+    
+    
+def plot_plate_trajectories_from_filenames_summary(filenames_path, saveDir):
+    """ Plot plate trajectories for all files in Tierpsy filenames summaries
+        'filenames_path', and save results to 'saveDir' """
+
+    filenames_df = pd.read_csv(filenames_path, comment='#')
+    filenames_list = filenames_df[filenames_df['is_good']==True]['file_name']
+    
+    plot_plate_trajectories_from_featuresN_filelist(featuresN_filelist=filenames_list, 
+                                                    saveDir=saveDir)
+  
+
 #%% Main
     
 if __name__ == "__main__":
     print("\nRunning: ", sys.argv[0])
     
-    example_featuresN = Path("/Volumes/behavgenom$/Saul/MicrobiomeScreen96WP/Results/20200222/microbiome_screen2_run7_p1_20200222_122858.22956805/metadata_featuresN.hdf5")
-    
+    example_featuresN_dir = "/Volumes/behavgenom$/Saul/MicrobiomeScreen96WP/Results/20200924"
+
     parser = argparse.ArgumentParser()
-    # default to example file if none given
-    parser.add_argument("--input", help="input file path (featuresN)", 
-                        default=example_featuresN)
-    # default to input's grandparent if non given
+
+    parser.add_argument("--input", help="input directory path (featuresN)", 
+                        default=example_featuresN_dir)
+    
     known_args = parser.parse_known_args()
     parser.add_argument("--output", help="output directory path (for saving)",
-                        default=Path(known_args[0].input).parent.parent)
+                        default=Path(known_args[0].input) / "plate_trajectories")
 
-    # parser.add_argument("--downsample", help="downsample trajectory data by plotting the worm centroid for every 'nth' frame",
-    #                     default=10)
+    parser.add_argument("--downsample", help="downsample trajectory data by plotting the worm centroid for every 'nth' frame",
+                        default=10)
+    
     args = parser.parse_args()
     print("Input file:", args.input)
     print("Output directory:", args.output)
+    print("Downsample:", args.downsample)
     
-    plot_plate_trajectories(args.input, saveDir=args.output, downsample=10)
+    featuresN_filelist = list(Path(args.input).rglob('*_featuresN.hdf5'))
+    
+    plot_plate_trajectories_from_featuresN_filelist(featuresN_filelist, args.output)  
+    #plot_plate_trajectories(Path(args.input), saveDir=Path(args.output), downsample=args.downsample)
+else:
+    print("\nImporting: 'plot_plate_trajectories_with_raw_video_background.py'")
 
     
